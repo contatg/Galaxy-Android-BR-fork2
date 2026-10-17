@@ -76,8 +76,11 @@ jobs:
           sudo apt-get install -y ninja-build ccache libvulkan-dev libgles2-mesa-dev libegl1-mesa-dev
           python -m pip install 'cmake==3.31.10'
           cmake --version
-          printf 'y\n%.0s' {1..100} | sdkmanager --licenses > /dev/null
-          sdkmanager 'platforms;android-34' 'build-tools;35.0.0'
+          GALAXY_SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort -V | tail -1)"
+          test -x "$GALAXY_SDKMANAGER"
+          echo "$(dirname "$GALAXY_SDKMANAGER")" >> "$GITHUB_PATH"
+          printf 'y\n%.0s' {1..100} | "$GALAXY_SDKMANAGER" --licenses > /dev/null
+          "$GALAXY_SDKMANAGER" 'platforms;android-34' 'build-tools;35.0.0'
           test -s installer-mobile/vendor/python/lib/arm64-v8a/libpython3.10.so
           test -s installer-mobile/assets/pythonhome.zip
           test -s installer-mobile/vendor/nodtool/libnodtool.so
