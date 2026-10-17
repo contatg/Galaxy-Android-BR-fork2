@@ -95,7 +95,6 @@ jobs:
           path: |
             .ccache
             ${{ steps.ndk.outputs.ndk-path }}/sources/third_party/shaderc/libs
-            ${{ steps.ndk.outputs.ndk-path }}/sources/third_party/shaderc/include
           key: android-arm64-${{ runner.os }}-r27d-release-v1-${{ github.sha }}
           restore-keys: |
             android-arm64-${{ runner.os }}-r27d-release-v1-
@@ -111,6 +110,16 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
+          # Keep the existing cache paths compatible. The NDK already contains
+          # the matching public headers; ndk-build normally copies them here.
+          GALAXY_SHADERC="$ANDROID_NDK_HOME/sources/third_party/shaderc"
+          if [ ! -s "$GALAXY_SHADERC/include/shaderc/shaderc.hpp" ]; then
+            GALAXY_SHADERC_HEADER="$(find "$GALAXY_SHADERC" -type f -path '*/include/shaderc/shaderc.hpp' -print -quit)"
+            if [ -n "$GALAXY_SHADERC_HEADER" ]; then
+              mkdir -p "$GALAXY_SHADERC/include/shaderc"
+              cp -a "$(dirname "$GALAXY_SHADERC_HEADER")/." "$GALAXY_SHADERC/include/shaderc/"
+            fi
+          fi
           if [ ! -s "$ANDROID_NDK_HOME/sources/third_party/shaderc/libs/c++_static/arm64-v8a/libshaderc.a" ] || \
              [ ! -s "$ANDROID_NDK_HOME/sources/third_party/shaderc/include/shaderc/shaderc.hpp" ]; then
             "$ANDROID_NDK_HOME/ndk-build" -C "$ANDROID_NDK_HOME/sources/third_party/shaderc" \
