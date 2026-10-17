@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 
 #include <algorithm>
 #include <string>
@@ -716,105 +717,69 @@ void UIOverlay::update(PortPadState& pad, int& spinFrames) {
         mFpsFrameCounter = 0;
         mFpsLastTimeNs = nowNs;
 
-        // Sample CPU usage:
-        // 1. Try global /proc/stat (available on older Android or rooted/permissive ROMs)
-        bool gotCpu = false;
-        static unsigned long long prevUser = 0, prevNice = 0, prevSystem = 0, prevIdle = 0;
-        FILE* fpStat = fopen("/proc/stat", "r");
-        if (fpStat) {
-            unsigned long long u = 0, n = 0, s = 0, idle = 0, iowait = 0, irq = 0, softirq = 0;
-            if (fscanf(fpStat, "cpu %llu %llu %llu %llu %llu %llu %llu", &u, &n, &s, &idle, &iowait, &irq, &softirq) >= 4) {
-                unsigned long long total = (u + n + s + idle + iowait + irq + softirq);
-                unsigned long long prevTotal = (prevUser + prevNice + prevSystem + prevIdle);
-                if (prevTotal > 0 && total > prevTotal) {
-                    unsigned long long totalDiff = total - prevTotal;
-                    unsigned long long idleDiff = (idle + iowait) - prevIdle;
-                    if (totalDiff > 0 && idleDiff <= totalDiff) {
-                        mCpuUsagePercent = (float)(totalDiff - idleDiff) * 100.0f / (float)totalDiff;
-                        gotCpu = true;
+        // Hardware counters are only displayed by the full HUD. Keep FPS
+        // sampling active in every mode, without probing files in FPS-only/off.
+        if (mSettings.perfHudMode == 2) {
+            struct timespec cpuTime{};
+            if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpuTime) == 0) {
+                const int64_t cpuNs = (int64_t)cpuTime.tv_sec * 1000000000ll + cpuTime.tv_nsec;
+                if (mLastHwSampleTime && mLastCpuTimeNs && nowNs > mLastHwSampleTime) {
+                    static const long cores = std::max(1L, sysconf(_SC_NPROCESSORS_ONLN));
+                    const double usage = 100.0 * (cpuNs - mLastCpuTimeNs) /
+                                         (double)(nowNs - mLastHwSampleTime) / cores;
+                    mCpuUsagePercent = (float)std::clamp(usage, 0.0, 100.0);
+                }
+                mLastCpuTimeNs = cpuNs;
+                mLastHwSampleTime = nowNs;
+            }
+
+            // Sample RAM usage from /proc/self/statm
+            FILE* fpStatm = fopen("/proc/self/statm", "r");
+            if (fpStatm) {
+                unsigned long sizePages = 0, residentPages = 0;
+                if (fscanf(fpStatm, "%lu %lu", &sizePages, &residentPages) == 2) {
+                    // Android devices can use 4 KB or 16 KB pages.
+                    static const long pageBytes = sysconf(_SC_PAGESIZE);
+                    if (pageBytes > 0) mRamUsageMB = (float)((double)residentPages * pageBytes / (1024.0 * 1024.0));
+                }
+                fclose(fpStatm);
+            }
+
+            // Sample GPU usage
+            bool gotGpu = false;
+            static const char* const gpuSysfsPaths[] = {
+                "/sys/kernel/ged/hal/gpu_utilization",
+                "/sys/class/misc/mali0/device/utilization",
+                "/sys/devices/platform/13000000.mali/utilization",
+                "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage"
+            };
+            for (const char* path : gpuSysfsPaths) {
+                FILE* fpGpu = fopen(path, "r");
+                if (fpGpu) {
+                    int val = -1;
+                    if (fscanf(fpGpu, "%d", &val) == 1 && val >= 0) {
+                        mGpuUsagePercent = (float)(val > 100 ? 100 : val);
+                        gotGpu = true;
                     }
+                    fclose(fpGpu);
+                    if (gotGpu) break;
                 }
-                prevUser = u + n;
-                prevSystem = s + irq + softirq;
-                prevIdle = idle + iowait;
             }
-            fclose(fpStat);
-        }
-
-        // 2. SELinux on Android 8+ blocks app access to /proc/stat. Fall back to process CPU via /proc/self/stat
-        if (!gotCpu) {
-            static unsigned long long prevProcTicks = 0;
-            FILE* fpSelf = fopen("/proc/self/stat", "r");
-            if (fpSelf) {
-                char statBuf[512];
-                if (fgets(statBuf, sizeof(statBuf), fpSelf)) {
-                    char* paren = strrchr(statBuf, ')');
-                    if (paren) {
-                        unsigned long long utime = 0, stime = 0;
-                        // Fields after ')': state, ppid, pgrp, session, tty_nr, tpgid, flags, minflt, cminflt, majflt, cmajflt, utime, stime
-                        if (sscanf(paren + 1, " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &utime, &stime) == 2) {
-                            unsigned long long totalTicks = utime + stime;
-                            if (prevProcTicks > 0 && totalTicks >= prevProcTicks && sec > 0.001f) {
-                                long clkTck = sysconf(_SC_CLK_TCK);
-                                if (clkTck <= 0) clkTck = 100;
-                                long numCores = sysconf(_SC_NPROCESSORS_ONLN);
-                                if (numCores <= 0) numCores = 1;
-                                float cpuSec = (float)(totalTicks - prevProcTicks) / (float)clkTck;
-                                float usage = (cpuSec / sec) * 100.0f / (float)numCores;
-                                if (usage < 0.0f) usage = 0.0f;
-                                if (usage > 100.0f) usage = 100.0f;
-                                mCpuUsagePercent = usage;
-                            }
-                            prevProcTicks = totalTicks;
-                        }
-                    }
+            if (!gotGpu) {
+                // Render duty cycle fallback: measured active GPU render time vs window duration
+                if (diffNs > 0 && mGpuRenderFrameCount > 0) {
+                    float gpuDuty = ((float)mGpuRenderTimeAccumNs / (float)diffNs) * 100.0f;
+                    if (gpuDuty < 0.0f) gpuDuty = 0.0f;
+                    if (gpuDuty > 100.0f) gpuDuty = 100.0f;
+                    mGpuUsagePercent = gpuDuty;
+                } else if (mCurrentFps > 0.0f) {
+                    // Approximate fallback based on frame pacing
+                    mGpuUsagePercent = std::min(100.0f, (mAvgFrameTimeMs / 16.67f) * 40.0f);
                 }
-                fclose(fpSelf);
             }
-        }
-
-        // Sample RAM usage from /proc/self/statm
-        FILE* fpStatm = fopen("/proc/self/statm", "r");
-        if (fpStatm) {
-            unsigned long sizePages = 0, residentPages = 0;
-            if (fscanf(fpStatm, "%lu %lu", &sizePages, &residentPages) == 2) {
-                // 4KB page size
-                mRamUsageMB = (float)(residentPages * 4096) / (1024.0f * 1024.0f);
-            }
-            fclose(fpStatm);
-        }
-
-        // Sample GPU usage
-        bool gotGpu = false;
-        static const char* const gpuSysfsPaths[] = {
-            "/sys/kernel/ged/hal/gpu_utilization",
-            "/sys/class/misc/mali0/device/utilization",
-            "/sys/devices/platform/13000000.mali/utilization",
-            "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage"
-        };
-        for (const char* path : gpuSysfsPaths) {
-            FILE* fpGpu = fopen(path, "r");
-            if (fpGpu) {
-                int val = -1;
-                if (fscanf(fpGpu, "%d", &val) == 1 && val >= 0) {
-                    mGpuUsagePercent = (float)(val > 100 ? 100 : val);
-                    gotGpu = true;
-                }
-                fclose(fpGpu);
-                if (gotGpu) break;
-            }
-        }
-        if (!gotGpu) {
-            // Render duty cycle fallback: measured active GPU render time vs window duration
-            if (diffNs > 0 && mGpuRenderFrameCount > 0) {
-                float gpuDuty = ((float)mGpuRenderTimeAccumNs / (float)diffNs) * 100.0f;
-                if (gpuDuty < 0.0f) gpuDuty = 0.0f;
-                if (gpuDuty > 100.0f) gpuDuty = 100.0f;
-                mGpuUsagePercent = gpuDuty;
-            } else if (mCurrentFps > 0.0f) {
-                // Approximate fallback based on frame pacing
-                mGpuUsagePercent = std::min(100.0f, (mAvgFrameTimeMs / 16.67f) * 40.0f);
-            }
+        } else {
+            mLastHwSampleTime = 0;
+            mLastCpuTimeNs = 0;
         }
         mGpuRenderTimeAccumNs = 0;
         mGpuRenderFrameCount = 0;
@@ -3055,7 +3020,7 @@ void UIOverlay::generateVertices(int screenW, int screenH, std::vector<UIVertex>
 void UIOverlay::render(int screenW, int screenH) {
     if (!init()) return;
 
-    std::vector<UIVertex> verts;
+    auto& verts = mVertices;
     generateVertices(screenW, screenH, verts);
     if (verts.empty()) return;
 

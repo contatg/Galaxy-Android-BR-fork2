@@ -1,4 +1,5 @@
 #include "vk_renderer.h"
+#include "port/port.h"
 
 #include <android/log.h>
 #include <algorithm>
@@ -529,20 +530,28 @@ void VkRenderer::shutdown() {
         // Frame resources
         for (auto& fr : mFrameRes) {
             if (fr.vbo) vkDestroyBuffer(mDevice, fr.vbo, nullptr);
+            if (fr.vboMapped) vkUnmapMemory(mDevice, fr.vboMem);
             if (fr.vboMem) vkFreeMemory(mDevice, fr.vboMem, nullptr);
             if (fr.ibo) vkDestroyBuffer(mDevice, fr.ibo, nullptr);
+            if (fr.iboMapped) vkUnmapMemory(mDevice, fr.iboMem);
             if (fr.iboMem) vkFreeMemory(mDevice, fr.iboMem, nullptr);
             if (fr.rowBuf) vkDestroyBuffer(mDevice, fr.rowBuf, nullptr);
+            if (fr.rowMapped) vkUnmapMemory(mDevice, fr.rowMem);
             if (fr.rowMem) vkFreeMemory(mDevice, fr.rowMem, nullptr);
             if (fr.recBuf) vkDestroyBuffer(mDevice, fr.recBuf, nullptr);
+            if (fr.recMapped) vkUnmapMemory(mDevice, fr.recMem);
             if (fr.recMem) vkFreeMemory(mDevice, fr.recMem, nullptr);
             if (fr.stBuf) vkDestroyBuffer(mDevice, fr.stBuf, nullptr);
+            if (fr.stMapped) vkUnmapMemory(mDevice, fr.stMem);
             if (fr.stMem) vkFreeMemory(mDevice, fr.stMem, nullptr);
             if (fr.vtxRecBuf) vkDestroyBuffer(mDevice, fr.vtxRecBuf, nullptr);
+            if (fr.vtxRecMapped) vkUnmapMemory(mDevice, fr.vtxRecMem);
             if (fr.vtxRecMem) vkFreeMemory(mDevice, fr.vtxRecMem, nullptr);
             if (fr.eyeUbo) vkDestroyBuffer(mDevice, fr.eyeUbo, nullptr);
+            if (fr.eyeMapped) vkUnmapMemory(mDevice, fr.eyeMem);
             if (fr.eyeMem) vkFreeMemory(mDevice, fr.eyeMem, nullptr);
             if (fr.uiVbo) vkDestroyBuffer(mDevice, fr.uiVbo, nullptr);
+            if (fr.uiVboMapped) vkUnmapMemory(mDevice, fr.uiVboMem);
             if (fr.uiVboMem) vkFreeMemory(mDevice, fr.uiVboMem, nullptr);
             fr = {};
         }
@@ -1936,14 +1945,14 @@ void VkRenderer::destroyUiPipeline() {
 void VkRenderer::renderUiOverlay(int width, int height) {
     if (mUiPipeline == VK_NULL_HANDLE || mUiDescSet == VK_NULL_HANDLE) return;
 
-    std::vector<mobile_ui::UIVertex> verts;
+    auto& verts = mUiVertices;
     mobile_ui::UIOverlay::get().generateVertices(width, height, verts);
     if (verts.empty()) return;
 
     FrameResource& fr = mFrameRes[mFrameIndex];
-    uploadDynamicBuffer(fr.uiVbo, fr.uiVboMem, fr.uiVboCap,
+    if (!uploadDynamicBuffer(fr.uiVbo, fr.uiVboMem, fr.uiVboCap, fr.uiVboMapped,
                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                        verts.data(), verts.size() * sizeof(mobile_ui::UIVertex));
+                        verts.data(), verts.size() * sizeof(mobile_ui::UIVertex))) return;
 
     VkViewport vp{};
     vp.x = 0.0f;
@@ -2059,7 +2068,7 @@ bool VkRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMem
     return true;
 }
 
-bool VkRenderer::uploadDynamicBuffer(VkBuffer& buf, VkDeviceMemory& mem, size_t& currentCap,
+bool VkRenderer::uploadDynamicBuffer(VkBuffer& buf, VkDeviceMemory& mem, size_t& currentCap, void*& mapped,
                                      VkBufferUsageFlags usage, const void* data, size_t bytes) {
     size_t reqCap = (bytes > 0) ? bytes : 256;
     if (reqCap > currentCap || buf == VK_NULL_HANDLE || mem == VK_NULL_HANDLE) {
@@ -2074,24 +2083,30 @@ bool VkRenderer::uploadDynamicBuffer(VkBuffer& buf, VkDeviceMemory& mem, size_t&
             return false;
         }
 
-        // Successfully created replacement buffer; now safe to destroy old buffer
+        // Map once for the buffer's lifetime. HOST_COHERENT memory needs no
+        // explicit flush; existing submission fences protect CPU writes.
+        void* newMapped = nullptr;
+        VkResult mapRes = vkMapMemory(mDevice, newMem, 0, newCap, 0, &newMapped);
+        if (mapRes != VK_SUCCESS || !newMapped) {
+            LOGE("uploadDynamicBuffer: vkMapMemory failed: %d", mapRes);
+            vkDestroyBuffer(mDevice, newBuf, nullptr);
+            vkFreeMemory(mDevice, newMem, nullptr);
+            return false;
+        }
+
+        // Keep the old allocation intact until its replacement is ready.
+        if (mapped) vkUnmapMemory(mDevice, mem);
         if (buf != VK_NULL_HANDLE) vkDestroyBuffer(mDevice, buf, nullptr);
         if (mem != VK_NULL_HANDLE) vkFreeMemory(mDevice, mem, nullptr);
 
         buf = newBuf;
         mem = newMem;
         currentCap = newCap;
+        mapped = newMapped;
     }
 
     if (bytes > 0 && data) {
-        void* mapped = nullptr;
-        VkResult mapRes = vkMapMemory(mDevice, mem, 0, bytes, 0, &mapped);
-        if (mapRes != VK_SUCCESS || !mapped) {
-            LOGE("uploadDynamicBuffer: vkMapMemory failed: %d", mapRes);
-            return false;
-        }
         memcpy(mapped, data, bytes);
-        vkUnmapMemory(mDevice, mem);
     }
     return true;
 }
@@ -2477,7 +2492,37 @@ VkSampler VkRenderer::getSampler(uint32_t mode0, uint32_t mode1, uint32_t levels
     return s;
 }
 
-void VkRenderer::uploadTextures(const std::vector<std::shared_ptr<TexImage>>& textures) {
+bool VkRenderer::uploadTextures(const std::vector<std::shared_ptr<TexImage>>& textures) {
+    // Bound staging memory while amortizing submission/wait overhead across
+    // all new textures in a batch. The caller already waited for prior frames.
+    struct Staging { VkBuffer buffer; VkDeviceMemory memory; };
+    std::vector<Staging> staging;
+    size_t stagingBytes = 0;
+    bool recording = false;
+    auto flush = [&]() -> bool {
+        if (!recording) return true;
+        VkResult result = vkEndCommandBuffer(mCommandBuffer);
+        if (result == VK_SUCCESS) {
+            VkSubmitInfo si{};
+            si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &mCommandBuffer;
+            result = vkQueueSubmit(mQueue, 1, &si, VK_NULL_HANDLE);
+            if (result == VK_SUCCESS) result = vkQueueWaitIdle(mQueue);
+        }
+        for (const auto& allocation : staging) {
+            vkDestroyBuffer(mDevice, allocation.buffer, nullptr);
+            vkFreeMemory(mDevice, allocation.memory, nullptr);
+        }
+        staging.clear();
+        stagingBytes = 0;
+        recording = false;
+        if (result != VK_SUCCESS) {
+            markFatal("uploadTextures", "texture batch submission", (int)result);
+            return false;
+        }
+        return true;
+    };
     for (const auto& img : textures) {
         if (!img || img->rgba.empty() || img->width == 0 || img->height == 0) continue;
         // The images live on the TexImage itself, so they are released on the
@@ -2554,86 +2599,108 @@ void VkRenderer::uploadTextures(const std::vector<std::shared_ptr<TexImage>>& te
             continue;
         }
 
-        // Upload texture pixels via host-visible staging buffer
-        size_t totalBytes = img->rgba.size() * sizeof(uint32_t);
+        auto destroyTexture = [&]() {
+            vkDestroyImageView(mDevice, vt.view, nullptr);
+            vkDestroyImage(mDevice, vt.image, nullptr);
+            vkFreeMemory(mDevice, vt.memory, nullptr);
+        };
+        const size_t totalBytes = img->rgba.size() * sizeof(uint32_t);
+        // Flush before crossing the budget. One oversized image is allowed,
+        // then flushed immediately; individual images cannot be split here.
+        constexpr size_t kStagingBudget = 8 * 1024 * 1024;
+        if (recording && totalBytes > kStagingBudget - std::min(stagingBytes, kStagingBudget)) {
+            if (!flush()) { destroyTexture(); return false; }
+        }
         VkBuffer stagingBuf = VK_NULL_HANDLE;
         VkDeviceMemory stagingMem = VK_NULL_HANDLE;
-        if (createBuffer(totalBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                         stagingBuf, stagingMem)) {
-            void* mapped = nullptr;
-            if (vkMapMemory(mDevice, stagingMem, 0, totalBytes, 0, &mapped) == VK_SUCCESS) {
-                memcpy(mapped, img->rgba.data(), totalBytes);
-                vkUnmapMemory(mDevice, stagingMem);
-            }
+        if (!createBuffer(totalBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          stagingBuf, stagingMem)) {
+            destroyTexture();
+            flush();
+            return false;
+        }
+        void* mapped = nullptr;
+        VkResult result = vkMapMemory(mDevice, stagingMem, 0, totalBytes, 0, &mapped);
+        if (result != VK_SUCCESS || !mapped) {
+            vkDestroyBuffer(mDevice, stagingBuf, nullptr);
+            vkFreeMemory(mDevice, stagingMem, nullptr);
+            destroyTexture();
+            flush();
+            return false;
+        }
+        memcpy(mapped, img->rgba.data(), totalBytes);
+        vkUnmapMemory(mDevice, stagingMem);
+        staging.push_back({stagingBuf, stagingMem});
+        stagingBytes += totalBytes;
 
-            vkResetCommandBuffer(mCommandBuffer, 0);
+        if (!recording) {
+            result = vkResetCommandBuffer(mCommandBuffer, 0);
             VkCommandBufferBeginInfo bi{};
             bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            if (vkBeginCommandBuffer(mCommandBuffer, &bi) == VK_SUCCESS) {
-                VkImageMemoryBarrier barrierToDst{};
-                barrierToDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                barrierToDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                barrierToDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                barrierToDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                barrierToDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                barrierToDst.image = vt.image;
-                barrierToDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                barrierToDst.subresourceRange.levelCount = vt.levels;
-                barrierToDst.subresourceRange.layerCount = 1;
-                barrierToDst.srcAccessMask = 0;
-                barrierToDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-                vkCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrierToDst);
-
-                std::vector<VkBufferImageCopy> regions(vt.levels);
-                VkDeviceSize offset = 0;
-                uint32_t w = vt.width, h = vt.height;
-                for (uint32_t l = 0; l < vt.levels; l++) {
-                    regions[l].bufferOffset = offset;
-                    regions[l].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                    regions[l].imageSubresource.mipLevel = l;
-                    regions[l].imageSubresource.layerCount = 1;
-                    regions[l].imageExtent = {w, h, 1};
-                    offset += (VkDeviceSize)w * h * 4;
-                    w = w > 1 ? w / 2 : 1;
-                    h = h > 1 ? h / 2 : 1;
+            if (result == VK_SUCCESS) result = vkBeginCommandBuffer(mCommandBuffer, &bi);
+            if (result != VK_SUCCESS) {
+                for (const auto& allocation : staging) {
+                    vkDestroyBuffer(mDevice, allocation.buffer, nullptr);
+                    vkFreeMemory(mDevice, allocation.memory, nullptr);
                 }
-
-                vkCmdCopyBufferToImage(mCommandBuffer, stagingBuf, vt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                       (uint32_t)regions.size(), regions.data());
-
-                VkImageMemoryBarrier barrierToShader = barrierToDst;
-                barrierToShader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                barrierToShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                barrierToShader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                barrierToShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-                vkCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrierToShader);
-
-                if (vkEndCommandBuffer(mCommandBuffer) == VK_SUCCESS) {
-                    VkSubmitInfo si{};
-                    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                    si.commandBufferCount = 1;
-                    si.pCommandBuffers = &mCommandBuffer;
-                    vkQueueSubmit(mQueue, 1, &si, VK_NULL_HANDLE);
-                    vkQueueWaitIdle(mQueue);
-                }
+                destroyTexture();
+                markFatal("uploadTextures", "begin texture batch", (int)result);
+                return false;
             }
-
-            vkDestroyBuffer(mDevice, stagingBuf, nullptr);
-            vkFreeMemory(mDevice, stagingMem, nullptr);
+            recording = true;
         }
+        VkImageMemoryBarrier barrierToDst{};
+        barrierToDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrierToDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrierToDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrierToDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrierToDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrierToDst.image = vt.image;
+        barrierToDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrierToDst.subresourceRange.levelCount = vt.levels;
+        barrierToDst.subresourceRange.layerCount = 1;
+        barrierToDst.srcAccessMask = 0;
+        barrierToDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+        vkCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrierToDst);
+
+        std::vector<VkBufferImageCopy> regions(vt.levels);
+        VkDeviceSize offset = 0;
+        uint32_t w = vt.width, h = vt.height;
+        for (uint32_t l = 0; l < vt.levels; l++) {
+            regions[l].bufferOffset = offset;
+            regions[l].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            regions[l].imageSubresource.mipLevel = l;
+            regions[l].imageSubresource.layerCount = 1;
+            regions[l].imageExtent = {w, h, 1};
+            offset += (VkDeviceSize)w * h * 4;
+            w = w > 1 ? w / 2 : 1;
+            h = h > 1 ? h / 2 : 1;
+        }
+
+        vkCmdCopyBufferToImage(mCommandBuffer, stagingBuf, vt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               (uint32_t)regions.size(), regions.data());
+
+        VkImageMemoryBarrier barrierToShader = barrierToDst;
+        barrierToShader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrierToShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrierToShader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrierToShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrierToShader);
 
         img->vkImage = (uint64_t)vt.image;
         img->vkMemory = (uint64_t)vt.memory;
         img->vkView = (uint64_t)vt.view;
         img->vkVersion = vt.version;
         img->vkGeneration = sVkDeviceGeneration;
+        if (stagingBytes >= kStagingBudget && !flush()) return false;
     }
+    return flush();
 }
 
 // The GL blend state the Item carries (see gx_builder.cpp).
@@ -3116,12 +3183,12 @@ bool VkRenderer::render(VkTarget& target, const EyeView* eye, VkTarget* hud, Hud
 
     // Upload geometry & storage buffers
     bool uploadOk = true;
-    uploadOk &= uploadDynamicBuffer(fr.vbo, fr.vboMem, fr.vboCap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, f.verts.data(), f.verts.size() * sizeof(uint32_t));
-    uploadOk &= uploadDynamicBuffer(fr.ibo, fr.iboMem, fr.iboCap, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, p.indices.data(), p.indices.size() * sizeof(uint32_t));
-    uploadOk &= uploadDynamicBuffer(fr.rowBuf, fr.rowMem, fr.rowCap, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.rows.data(), p.rows.size() * sizeof(float));
-    uploadOk &= uploadDynamicBuffer(fr.recBuf, fr.recMem, fr.recCap, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.recs.data(), p.recs.size() * sizeof(uint32_t));
-    uploadOk &= uploadDynamicBuffer(fr.stBuf, fr.stMem, fr.stCap, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.states.data(), p.states.size() * sizeof(float));
-    uploadOk &= uploadDynamicBuffer(fr.vtxRecBuf, fr.vtxRecMem, fr.vtxRecCap, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.vtxRec.data(), p.vtxRec.size() * sizeof(uint32_t));
+    uploadOk &= uploadDynamicBuffer(fr.vbo, fr.vboMem, fr.vboCap, fr.vboMapped, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, f.verts.data(), f.verts.size() * sizeof(uint32_t));
+    uploadOk &= uploadDynamicBuffer(fr.ibo, fr.iboMem, fr.iboCap, fr.iboMapped, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, p.indices.data(), p.indices.size() * sizeof(uint32_t));
+    uploadOk &= uploadDynamicBuffer(fr.rowBuf, fr.rowMem, fr.rowCap, fr.rowMapped, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.rows.data(), p.rows.size() * sizeof(float));
+    uploadOk &= uploadDynamicBuffer(fr.recBuf, fr.recMem, fr.recCap, fr.recMapped, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.recs.data(), p.recs.size() * sizeof(uint32_t));
+    uploadOk &= uploadDynamicBuffer(fr.stBuf, fr.stMem, fr.stCap, fr.stMapped, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.states.data(), p.states.size() * sizeof(float));
+    uploadOk &= uploadDynamicBuffer(fr.vtxRecBuf, fr.vtxRecMem, fr.vtxRecCap, fr.vtxRecMapped, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, p.vtxRec.data(), p.vtxRec.size() * sizeof(uint32_t));
 
     // Upload EyeBlock UBO
     EyeBlock eb{};
@@ -3141,7 +3208,7 @@ bool VkRenderer::render(VkTarget& target, const EyeView* eye, VkTarget* hud, Hud
         eb.vrStereo2[0] = eye->pointer[0];
         eb.vrStereo2[1] = eye->pointer[1];
     }
-    uploadOk &= uploadDynamicBuffer(fr.eyeUbo, fr.eyeMem, fr.eyeCap, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &eb, sizeof(eb));
+    uploadOk &= uploadDynamicBuffer(fr.eyeUbo, fr.eyeMem, fr.eyeCap, fr.eyeMapped, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &eb, sizeof(eb));
     if (!uploadOk) {
         LOGE("render: failed to upload one or more dynamic buffers");
         return false;
@@ -3161,33 +3228,39 @@ bool VkRenderer::render(VkTarget& target, const EyeView* eye, VkTarget* hud, Hud
         }
     }
 
-    VkDescriptorBufferInfo bInfo[5]{};
-    bInfo[0] = {fr.rowBuf, 0, VK_WHOLE_SIZE};
-    bInfo[1] = {fr.recBuf, 0, VK_WHOLE_SIZE};
-    bInfo[2] = {fr.stBuf, 0, VK_WHOLE_SIZE};
-    bInfo[3] = {fr.vtxRecBuf, 0, VK_WHOLE_SIZE};
-    bInfo[4] = {fr.eyeUbo, 0, sizeof(EyeBlock)};
+    const std::array<VkBuffer, 5> storageBuffers = {
+        fr.rowBuf, fr.recBuf, fr.stBuf, fr.vtxRecBuf, fr.eyeUbo
+    };
+    if (fr.storageBuffers != storageBuffers) {
+        VkDescriptorBufferInfo bInfo[5]{};
+        bInfo[0] = {fr.rowBuf, 0, VK_WHOLE_SIZE};
+        bInfo[1] = {fr.recBuf, 0, VK_WHOLE_SIZE};
+        bInfo[2] = {fr.stBuf, 0, VK_WHOLE_SIZE};
+        bInfo[3] = {fr.vtxRecBuf, 0, VK_WHOLE_SIZE};
+        bInfo[4] = {fr.eyeUbo, 0, sizeof(EyeBlock)};
 
-    VkWriteDescriptorSet writes[5]{};
-    for (uint32_t i = 0; i < 4; i++) {
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = fr.set0;
-        writes[i].dstBinding = i;
-        writes[i].descriptorCount = 1;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[i].pBufferInfo = &bInfo[i];
+        VkWriteDescriptorSet writes[5]{};
+        for (uint32_t i = 0; i < 4; i++) {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = fr.set0;
+            writes[i].dstBinding = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo = &bInfo[i];
+        }
+        writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[4].dstSet = fr.set0;
+        writes[4].dstBinding = 4;
+        writes[4].descriptorCount = 1;
+        writes[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[4].pBufferInfo = &bInfo[4];
+
+        vkUpdateDescriptorSets(mDevice, 5, writes, 0, nullptr);
+        fr.storageBuffers = storageBuffers;
     }
-    writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[4].dstSet = fr.set0;
-    writes[4].dstBinding = 4;
-    writes[4].descriptorCount = 1;
-    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[4].pBufferInfo = &bInfo[4];
-
-    vkUpdateDescriptorSets(mDevice, 5, writes, 0, nullptr);
 
     // Upload new / updated textures
-    uploadTextures(f.textures);
+    if (!uploadTextures(f.textures)) return false;
 
     vkResetCommandBuffer(mCommandBuffer, 0);
 

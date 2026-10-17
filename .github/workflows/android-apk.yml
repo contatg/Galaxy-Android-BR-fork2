@@ -1,0 +1,157 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master, otimizacoes-android]
+    paths:
+      - '.github/workflows/android-apk.yml'
+      - 'CMakeLists.txt'
+      - 'build_mobile.sh'
+      - 'package_mobile_apk.py'
+      - 'platform/**'
+      - 'decomp/**'
+      - 'installer-mobile/**'
+      - 'tools/tests/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: r27d
+  BUILD_JOBS: '2'
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_COMPILERCHECK: content
+  CCACHE_MAXSIZE: 2G
+
+jobs:
+  android:
+    name: Android ARM64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Vulkan headers for host tests
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: KhronosGroup/Vulkan-Headers
+          ref: acbb9391c0a597272800cd3f4363661c00a27c77
+          path: .ci/vulkan-headers
+          persist-credentials: false
+
+      - name: Prepare logs
+        run: mkdir -p build-logs out
+
+      - name: Java 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Python 3.10
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.10'
+
+      - name: Android NDK
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
+        id: ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+          link-to-sdk: true
+
+      - name: Install build and test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache libvulkan-dev libgles2-mesa-dev libegl1-mesa-dev
+          python -m pip install 'cmake==3.31.10'
+          cmake --version
+          printf 'y\n%.0s' {1..100} | sdkmanager --licenses > /dev/null
+          sdkmanager 'platforms;android-34' 'build-tools;35.0.0'
+          test -s installer-mobile/vendor/python/lib/arm64-v8a/libpython3.10.so
+          test -s installer-mobile/assets/pythonhome.zip
+          test -s installer-mobile/vendor/nodtool/libnodtool.so
+
+      - name: Restore compiler and shaderc caches
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            .ccache
+            ${{ steps.ndk.outputs.ndk-path }}/sources/third_party/shaderc/libs
+          key: android-arm64-${{ runner.os }}-r27d-release-v1-${{ github.sha }}
+          restore-keys: |
+            android-arm64-${{ runner.os }}-r27d-release-v1-
+
+      - name: Run host regression tests
+        env:
+          GALAXY_VULKAN_INCLUDE: ${{ github.workspace }}/.ci/vulkan-headers/include
+        run: |
+          python -m unittest discover -s tools/tests -p test_shadergen.py -v 2>&1 | tee build-logs/shader-tests.log
+          python -m unittest discover -s tools/tests -p test_mobile_performance.py -v 2>&1 | tee build-logs/performance-tests.log
+
+      - name: Build shaderc for ARM64
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          if [ ! -s "$ANDROID_NDK_HOME/sources/third_party/shaderc/libs/c++_static/arm64-v8a/libshaderc.a" ]; then
+            "$ANDROID_NDK_HOME/ndk-build" -C "$ANDROID_NDK_HOME/sources/third_party/shaderc" \
+              NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_ABI=arm64-v8a \
+              APP_STL=c++_static APP_PLATFORM=android-30 libshaderc_combined \
+              -j"$BUILD_JOBS" 2>&1 | tee build-logs/shaderc.log
+          fi
+          test -s "$ANDROID_NDK_HOME/sources/third_party/shaderc/libs/c++_static/arm64-v8a/libshaderc.a"
+
+      - name: Configure and compile native libraries
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          ccache --zero-stats
+          cmake -S . -B build-mobile -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 \
+            -DTARGET_MOBILE=ON -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            2>&1 | tee build-logs/configure.log
+          cmake --build build-mobile --target game main reserve installer --parallel "$BUILD_JOBS" \
+            2>&1 | tee build-logs/native-build.log
+          ccache --show-stats | tee build-logs/ccache.log
+
+      - name: Package and verify test APK
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          GALAXY_ALLOW_DEBUGGABLE: '1'
+          # A test build is signed with a temporary key. No release secrets are
+          # required; the release workflow still requires the project identity.
+          GALAXY_ALLOW_NEW_KEY: '1'
+        run: |
+          python package_mobile_apk.py 2>&1 | tee build-logs/package.log
+          python tools/ci/verify_mobile_apk.py out-mobile/GalaxyAndroid.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose out-mobile/GalaxyAndroid.apk
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 out-mobile/GalaxyAndroid.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: GalaxyAndroid-arm64-${{ github.run_id }}
+          path: out-mobile/GalaxyAndroid.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: GalaxyAndroid-logs-${{ github.run_id }}
+          path: build-logs/
+          if-no-files-found: warn
+          retention-days: 14

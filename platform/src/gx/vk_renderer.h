@@ -108,37 +108,46 @@ struct FrameResource {
     VkBuffer vbo = VK_NULL_HANDLE;
     VkDeviceMemory vboMem = VK_NULL_HANDLE;
     size_t vboCap = 0;
+    void* vboMapped = nullptr;
 
     VkBuffer ibo = VK_NULL_HANDLE;
     VkDeviceMemory iboMem = VK_NULL_HANDLE;
     size_t iboCap = 0;
+    void* iboMapped = nullptr;
 
     VkBuffer rowBuf = VK_NULL_HANDLE;
     VkDeviceMemory rowMem = VK_NULL_HANDLE;
     size_t rowCap = 0;
+    void* rowMapped = nullptr;
 
     VkBuffer recBuf = VK_NULL_HANDLE;
     VkDeviceMemory recMem = VK_NULL_HANDLE;
     size_t recCap = 0;
+    void* recMapped = nullptr;
 
     VkBuffer stBuf = VK_NULL_HANDLE;
     VkDeviceMemory stMem = VK_NULL_HANDLE;
     size_t stCap = 0;
+    void* stMapped = nullptr;
 
     VkBuffer vtxRecBuf = VK_NULL_HANDLE;
     VkDeviceMemory vtxRecMem = VK_NULL_HANDLE;
     size_t vtxRecCap = 0;
+    void* vtxRecMapped = nullptr;
 
     VkBuffer eyeUbo = VK_NULL_HANDLE;
     VkDeviceMemory eyeMem = VK_NULL_HANDLE;
     size_t eyeCap = 0;
+    void* eyeMapped = nullptr;
 
     VkDescriptorSet set0 = VK_NULL_HANDLE;
+    std::array<VkBuffer, 5> storageBuffers{};
 
     // UI dynamic vertex buffer
     VkBuffer uiVbo = VK_NULL_HANDLE;
     VkDeviceMemory uiVboMem = VK_NULL_HANDLE;
     size_t uiVboCap = 0;
+    void* uiVboMapped = nullptr;
 };
 
 struct VkTexture {
@@ -220,11 +229,11 @@ private:
 
     bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
                       VkBuffer& buffer, VkDeviceMemory& bufferMemory);
-    bool uploadDynamicBuffer(VkBuffer& buf, VkDeviceMemory& mem, size_t& currentCap,
+    bool uploadDynamicBuffer(VkBuffer& buf, VkDeviceMemory& mem, size_t& currentCap, void*& mapped,
                              VkBufferUsageFlags usage, const void* data, size_t bytes);
 
     VkSampler getSampler(uint32_t mode0, uint32_t mode1, uint32_t levels);
-    void uploadTextures(const std::vector<std::shared_ptr<TexImage>>& textures);
+    bool uploadTextures(const std::vector<std::shared_ptr<TexImage>>& textures);
     VkPipeline getPipeline(const Item& it, const ShaderUid& uid);
     // Builds and caches the pipeline for one (shader, render state) pair.
     VkPipeline createPipeline(const Item& it, const PipelineKey& key, const ShaderUid& uid,
@@ -321,6 +330,7 @@ private:
 
     // Rotating frame resources
     FrameResource mFrameRes[2];
+    std::vector<mobile_ui::UIVertex> mUiVertices;
     int mFrameIndex = 0;
 
     // Shader worker state.  mShaderQueue/mShaderQueued/mShaderDone are guarded by

@@ -292,6 +292,8 @@ private:
     int64_t mGpuRenderTimeAccumNs = 0;
     int mGpuRenderFrameCount = 0;
     int64_t mLastHwSampleTime = 0;
+    int64_t mLastCpuTimeNs = 0;
+    std::vector<UIVertex> mVertices;
     std::string mGpuRendererName = "Mali-G68 GPU";
 
     // In-Game Log Viewer State
