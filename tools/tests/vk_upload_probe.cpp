@@ -10,7 +10,7 @@ static uintptr_t nextHandle = 1;
 template<class T> T handle() { return (T)nextHandle++; }
 static std::unordered_map<VkBuffer, size_t> buffers;
 static std::unordered_map<VkDeviceMemory, std::vector<unsigned char>> memory;
-static unsigned maps = 0, unmaps = 0, submits = 0, waits = 0, copies = 0;
+static unsigned maps = 0, unmaps = 0, submits = 0, waits = 0, copies = 0, images = 0;
 static bool failMap = false, failSubmit = false;
 static bool inFlight = false;
 extern "C" {
@@ -36,7 +36,7 @@ VkResult vkMapMemory(VkDevice, VkDeviceMemory m, VkDeviceSize, VkDeviceSize, VkM
     maps++; *p = memory.at(m).data(); return VK_SUCCESS;
 }
 void vkUnmapMemory(VkDevice, VkDeviceMemory) { unmaps++; }
-VkResult vkCreateImage(VkDevice, const VkImageCreateInfo*, const VkAllocationCallbacks*, VkImage* i) { *i = handle<VkImage>(); return VK_SUCCESS; }
+VkResult vkCreateImage(VkDevice, const VkImageCreateInfo*, const VkAllocationCallbacks*, VkImage* i) { *i = handle<VkImage>(); ++images; return VK_SUCCESS; }
 void vkGetImageMemoryRequirements(VkDevice, VkImage, VkMemoryRequirements* r) { *r = {64, 1, 1}; }
 VkResult vkBindImageMemory(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize) { return VK_SUCCESS; }
 VkResult vkCreateImageView(VkDevice, const VkImageViewCreateInfo*, const VkAllocationCallbacks*, VkImageView* v) { *v = handle<VkImageView>(); return VK_SUCCESS; }
@@ -113,13 +113,33 @@ int main() {
     for (int i = 0; i < 100; ++i) textures.push_back(image(4, 4));
     assert(r.uploadTextures(textures)); assert(submits == 1 && waits == 1 && copies == 100);
     assert(r.uploadTextures(textures)); assert(submits == 1); // unchanged cache hit
+    auto originalImage = textures[0]->vkImage;
+    unsigned originalImages = images;
     textures[0]->version++;
     assert(r.uploadTextures(textures)); assert(submits == 2 && copies == 101);
+    assert(images == originalImages && textures[0]->vkImage == originalImage);
+    // A failed update must preserve the last usable image and its version.
+    auto oldVersion = textures[0]->vkVersion;
+    textures[0]->version++;
+    failMap = true;
+    assert(!r.uploadTextures(textures));
+    assert(textures[0]->vkImage == originalImage && textures[0]->vkVersion == oldVersion);
+    failMap = false;
+    assert(r.uploadTextures(textures)); assert(images == originalImages);
+    textures[0]->width = 8; textures[0]->rgba.resize(8 * 4); textures[0]->version++;
+    assert(r.uploadTextures(textures)); assert(images == originalImages + 1);
+    assert(textures[0]->vkImage != originalImage);
     for (auto& p : textures) release(r, p);
     textures.clear();
     assert(buffers.empty() && memory.empty());
+    unsigned beforeBudget = submits;
     for (int i = 0; i < 3; ++i) textures.push_back(image(1024, 1024));
-    assert(r.uploadTextures(textures)); assert(submits == 4 && waits == 4); // 8 MiB + 4 MiB
+    assert(r.uploadTextures(textures)); assert(submits == beforeBudget + 2 && waits == submits); // 8 MiB + 4 MiB
+    for (auto& p : textures) release(r, p);
+    textures.clear();
+    unsigned beforeCountLimit = submits;
+    for (int i = 0; i < 257; ++i) textures.push_back(image(4, 4));
+    assert(r.uploadTextures(textures)); assert(submits == beforeCountLimit + 3);
     for (auto& p : textures) release(r, p);
     textures = {image(4, 4)};
     failMap = true;
@@ -130,5 +150,5 @@ int main() {
     assert(!r.uploadTextures(textures)); assert(r.hasFailed());
     for (auto& p : textures) release(r, p);
     assert(buffers.empty() && memory.empty());
-    std::puts("PASS: persistent mapping, growth rollback, texture batching, budget, cache and failure cleanup");
+    std::puts("PASS: persistent mapping, growth rollback, texture reuse/resize, bounded batching, cache and failure cleanup");
 }

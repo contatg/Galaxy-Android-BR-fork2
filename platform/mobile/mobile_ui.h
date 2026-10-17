@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string>
 #include "port/input.h"
+#include "render_resolution.h"
 
 #include <vector>
 
@@ -65,8 +66,8 @@ struct Settings {
     // In-game Language (0 = Auto, 1 = English, 2 = Spanish, 3 = French, 4 = German, 5 = Italian)
     int languageChoice = 0;
 
-    // Render Resolution Scale (0 = 480p Native, 1 = 720p HD, 2 = 1080p FHD, 3 = 1440p 2K)
-    int renderScale = 2;
+    // Persisted IDs: 0=480p, 1=720p, 2=1080p, 3=1440p, 4=240p, 5=360p.
+    int renderScale = resolution::defaultScale;
 
     // Haptic feedback (off by default)
     bool haptics = false;

@@ -3,7 +3,8 @@
 Workflow: **Build Android APK**, arquivo `.github/workflows/android-apk.yml`.
 Ele compila o código da branch escolhida, sem criar tags ou publicar releases.
 
-1. Envie as alterações para `main`/`master`; o build inicia automaticamente.
+1. Envie as alterações para `otimizacoes-android` (ou `main`/`master`);
+   o build inicia automaticamente para mudanças nos fontes e testes.
    Se o GitHub bloquear Actions por ser um fork, abra a aba Actions e habilite.
 2. Para executar novamente: Actions → Build Android APK → Run workflow.
 3. Ao terminar, abra a execução e baixe o artifact `GalaxyAndroid-arm64-<run_id>`.
@@ -26,6 +27,6 @@ atualizações estáveis, configure uma chave persistente conforme `SIGNING.md` 
 use o workflow de release. A compilação não demonstra desempenho ou estabilidade
 no celular.
 
-Na entrega feita nesta sessão, o workflow foi preparado e verificado localmente.
-A execução remota só pode ser confirmada após envio autenticado ao GitHub e
-identificação da execução na aba Actions.
+A primeira compilação deste fork foi concluída com sucesso na
+[execução 39074563139](https://github.com/contatg/Galaxy-Android-BR-fork2/actions/runs/39074563139).
+Para alterações posteriores, confira a execução correspondente ao novo commit.

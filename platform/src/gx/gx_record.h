@@ -78,6 +78,7 @@ struct TexImage {
     uint64_t vkMemory = 0;
     uint64_t vkView = 0;
     uint64_t vkVersion = 0;
+    uint32_t vkWidth = 0, vkHeight = 0, vkLevels = 0;
     // The Vulkan device these handles belong to.  After a device loss the
     // renderer builds a new device, and handles from the old one are dangling:
     // they have to be re-uploaded rather than reused or destroyed.

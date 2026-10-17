@@ -1,80 +1,67 @@
 # Otimizações Android — 17/10/2026
 
-Base: https://github.com/levighost8192/Galaxy-Android-BR-
+Base pública: https://github.com/levighost8192/Galaxy-Android-BR-
 Commit original: `4ebb96c0916e05c1e829102c2eb1d7f92acf9735`.
+Alterações deste fork na branch `otimizacoes-android`.
 
-Este pacote contém fontes alterados e testes. Não contém APK compilado nem os
-arquivos do jogo. Os ganhos de FPS e consumo ainda precisam ser medidos no celular.
+## Resolução
 
-## Alterações aplicadas
+- O menu oferece 240p, 360p, 480p, 720p, 1080p e 1440p. As opções alteram a altura
+  real do alvo de renderização, tanto no Vulkan como no OpenGL ES.
+- Novas configurações começam em 360p. Os IDs antigos de 480p a 1440p continuam
+  iguais; arquivos de configuração existentes conservam a resolução escolhida.
+- O modo de economia limita resoluções altas a 720p e preserva 240p/360p/480p.
+- As notas dos APKs BR 2.0/3.0 anunciam funções que não constam nesses fontes
+  públicos. Este fork implementa as opções acima; não reproduz funções cujo
+  código não foi publicado.
 
-- Vulkan: texturas novas/alteradas compartilham uma submissão de comandos por lote,
-  em vez de executar `vkQueueSubmit` e `vkQueueWaitIdle` para cada textura. O lote
-  limita os dados temporários de upload a 8 MiB; uma textura individual maior é
-  permitida e enviada sozinha. Esse limite é de dados, não da memória total do driver.
-- Vulkan: os oito buffers dinâmicos de cada recurso de quadro permanecem mapeados.
-  O mapeamento só muda ao aumentar a capacidade, e é desfeito antes de liberar
-  a memória. Uma falha no novo mapeamento preserva a alocação anterior.
-- Vulkan: descritores dos buffers de matrizes, registros, estados e câmera só
-  são reescritos quando seus buffers mudam. Atualizar o conteúdo não exige
-  reescrever os descritores.
-- Interface Vulkan e OpenGL ES: os vetores de vértices conservam sua capacidade
-  entre quadros, evitando reconstruir sua alocação a cada desenho.
-- Telemetria: os modos desligado e somente FPS deixam de abrir arquivos de
-  CPU/RAM/GPU. O modo completo mede CPU do processo com `CLOCK_PROCESS_CPUTIME_ID`,
-  sem ler `/proc/stat` ou `/proc/self/stat`. A leitura de RAM usa o tamanho real
-  de página informado pelo sistema, incluindo aparelhos com páginas de 16 KiB.
-- Falhas nos uploads: mapeamento, início de gravação e submissão são verificados;
-  a interface não desenha usando um buffer cujo upload falhou.
+## Vulkan e interface
 
-As cercas e barreiras de sincronização foram preservadas. Resolução, texturas,
-limite de FPS, física, shaders e configurações salvas mantêm os valores existentes.
+- O estado de pipeline, descritores de texturas, viewport e scissor só é enviado
+  novamente ao driver quando muda. O cache é local ao command buffer e é
+  invalidado nos comandos de cópia do EFB.
+- O buffer de índices é ligado uma vez por quadro; cada desenho usa `firstIndex`
+  para selecionar seus índices, mantendo os mesmos deslocamentos de vértices.
+- Texturas alteradas reutilizam imagem, memória e view quando dimensões, mipmaps
+  e dispositivo são compatíveis. Mudanças de tamanho recriam a alocação.
+- Uploads de texturas compartilham submissão/espera por lote. Cada lote permite
+  até 128 alocações temporárias e 8 MiB de dados; uma textura maior é enviada
+  sozinha. Esse limite de dados não representa toda a memória usada pelo driver.
+- Os oito buffers dinâmicos de cada recurso de quadro permanecem mapeados.
+  Uma falha ao mapear uma substituição preserva a alocação anterior.
+- Descritores de buffers só são reescritos quando seus buffers mudam.
+- Os vetores de vértices da interface Vulkan/OpenGL ES conservam sua capacidade
+  entre quadros.
+- Os painéis desligado e somente FPS não abrem arquivos de CPU/RAM/GPU.
+  O painel completo mede CPU com `CLOCK_PROCESS_CPUTIME_ID` e RAM com o tamanho
+  real de página do sistema, inclusive em aparelhos com páginas de 16 KiB.
 
-## Compilar no WSL/Linux
+As cercas e barreiras de sincronização foram preservadas. Os testes simulados
+validam o comportamento do código, mas não medem FPS nem validam drivers reais.
 
-Na pasta dos fontes, com as dependências do README original instaladas:
+## Compilação
 
-```bash
-export ANDROID_NDK_HOME=/caminho/para/android-ndk
-bash build_mobile.sh game main reserve installer
-python3 package_mobile_apk.py
-```
+O workflow [android-apk.yml](../.github/workflows/android-apk.yml) compila ARM64,
+executa os testes e verifica assinatura, alinhamento e conteúdo do APK. O APK
+anterior desta branch já foi compilado com sucesso pelo GitHub Actions.
+Cada compilação recebe uma chave de teste temporária, portanto não atualiza
+uma instalação assinada com outra chave.
 
-A geração de `installer` e o empacotamento também dependem do Python Android e
-das demais dependências externas indicadas pelo projeto original. Este pacote
-não altera o instalador nem fornece essas dependências.
+Para compilar no PC com as dependências instaladas, execute o script
+[Compilar-Galaxy-Android.ps1](../scripts/Compilar-Galaxy-Android.ps1), que usa WSL.
+A saída no clone é `out-mobile/GalaxyAndroid.apk`.
+Os arquivos do jogo não são incluídos.
 
-O caminho de saída documentado pelo projeto é `out-mobile/GalaxyAndroid.apk`.
-Neste ambiente, a tentativa de compilação parou com:
-`Android NDK not found: set ANDROID_NDK_HOME`. Não foi produzido APK.
+## Verificação
 
-## Aplicar somente o patch em um clone existente
+- 6 testes existentes de geração de shaders.
+- 4 testes de host: telemetria, resoluções, ciclo de vida de buffers/texturas e
+  cache de comandos Vulkan.
+- As verificações cobrem IDs salvos, alturas de renderização, modo de economia,
+  reutilização e redimensionamento de texturas, falha de mapeamento, limites dos
+  lotes e invalidação do cache entre cópias/quadros.
 
-O arquivo `galaxy-android-otimizacoes.patch`, no topo do ZIP, aplica as mesmas
-alterações no commit base. Na raiz do clone:
-
-```bash
-git apply --check /caminho/galaxy-android-otimizacoes.patch
-git apply /caminho/galaxy-android-otimizacoes.patch
-```
-
-Não aplique o patch sobre os fontes deste ZIP: eles já estão alterados.
-
-## Verificação realizada
-
-- 6 testes existentes de geração de shaders passaram.
-- 2 testes novos compilaram o renderizador/interface reais em Linux com APIs
-  Android/Vulkan simuladas e passaram.
-- O teste de upload verificou reutilização e crescimento de buffers, preservação
-  da alocação anterior em falha, 100 texturas pequenas em uma única submissão,
-  ausência de reenvio de texturas inalteradas, lotes de 8 MiB, limpeza de recursos
-  temporários e interrupção do renderizador após falha de submissão.
-- O teste de telemetria verificou ausência de aberturas de arquivos nos modos
-  desligado/somente FPS e reinício da referência de CPU ao alternar o painel.
-- Os testes simulados não validam saída visual, desempenho ou drivers reais.
-
-Para repetir os testes de host em Linux, use g++ e os headers oficiais Vulkan,
-OpenGL ES e EGL (instalados no sistema ou nas variáveis abaixo):
+Para repetir em Linux, use g++ e os headers oficiais Vulkan, OpenGL ES e EGL:
 
 ```bash
 export GALAXY_VULKAN_INCLUDE=/caminho/Vulkan-Headers/include
@@ -84,11 +71,7 @@ python3 -m unittest discover -s tools/tests -p test_shadergen.py -v
 python3 -m unittest discover -s tools/tests -p test_mobile_performance.py -v
 ```
 
-## Validação pendente no celular
-
-Compare antes/depois no mesmo aparelho, mesma fase e mesmas configurações.
-Faça uma passagem fria para observar compilação/carregamento, depois repita
-com caches aquecidos. Registre FPS, tempo de quadro e consumo após 10 minutos.
-Teste transição de fase, pausa/retomada, troca Vulkan/OpenGL ES, edição dos
-controles e painel desligado/somente FPS/completo. Confirme imagem, áudio e
-estabilidade. Não há promessa de 60 FPS ou percentual de melhoria.
+No celular, compare a mesma fase com as mesmas configurações, antes e depois.
+Teste 240p/360p, transições de fase, pausa/retomada e troca Vulkan/OpenGL ES.
+Confirme imagem, áudio e estabilidade após alguns minutos. Os ganhos no
+Snapdragon 685 ainda precisam ser medidos no aparelho.

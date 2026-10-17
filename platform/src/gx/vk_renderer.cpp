@@ -1,4 +1,5 @@
 #include "vk_renderer.h"
+#include "vk_draw_state.h"
 #include "port/port.h"
 
 #include <android/log.h>
@@ -2537,7 +2538,10 @@ bool VkRenderer::uploadTextures(const std::vector<std::shared_ptr<TexImage>>& te
             continue;
         }
 
-        if (img->vkView != 0 || img->vkImage != 0 || img->vkMemory != 0) {
+        const bool reuseImage = sameDevice && img->vkImage && img->vkMemory && img->vkView &&
+                                img->vkWidth == img->width && img->vkHeight == img->height &&
+                                img->vkLevels == (img->levels ? img->levels : 1);
+        if (!reuseImage && (img->vkView != 0 || img->vkImage != 0 || img->vkMemory != 0)) {
             if (sameDevice) {
                 if (img->vkView) vkDestroyImageView(mDevice, (VkImageView)img->vkView, nullptr);
                 if (img->vkImage) vkDestroyImage(mDevice, (VkImage)img->vkImage, nullptr);
@@ -2553,53 +2557,60 @@ bool VkRenderer::uploadTextures(const std::vector<std::shared_ptr<TexImage>>& te
         vt.levels = img->levels ? img->levels : 1;
         vt.version = img->version;
 
-        VkImageCreateInfo ici{};
-        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        ici.imageType = VK_IMAGE_TYPE_2D;
-        ici.extent = {vt.width, vt.height, 1};
-        ici.mipLevels = vt.levels;
-        ici.arrayLayers = 1;
-        ici.format = VK_FORMAT_R8G8B8A8_UNORM;
-        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        ici.samples = VK_SAMPLE_COUNT_1_BIT;
-        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (reuseImage) {
+            vt.image = (VkImage)img->vkImage;
+            vt.memory = (VkDeviceMemory)img->vkMemory;
+            vt.view = (VkImageView)img->vkView;
+        } else {
+            VkImageCreateInfo ici{};
+            ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            ici.imageType = VK_IMAGE_TYPE_2D;
+            ici.extent = {vt.width, vt.height, 1};
+            ici.mipLevels = vt.levels;
+            ici.arrayLayers = 1;
+            ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+            ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+            ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            ici.samples = VK_SAMPLE_COUNT_1_BIT;
+            ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-        if (vkCreateImage(mDevice, &ici, nullptr, &vt.image) != VK_SUCCESS) continue;
+            if (vkCreateImage(mDevice, &ici, nullptr, &vt.image) != VK_SUCCESS) continue;
 
-        VkMemoryRequirements memReqs;
-        vkGetImageMemoryRequirements(mDevice, vt.image, &memReqs);
+            VkMemoryRequirements memReqs;
+            vkGetImageMemoryRequirements(mDevice, vt.image, &memReqs);
 
-        VkMemoryAllocateInfo mai{};
-        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        mai.allocationSize = memReqs.size;
-        mai.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (mai.memoryTypeIndex == ~0u || vkAllocateMemory(mDevice, &mai, nullptr, &vt.memory) != VK_SUCCESS) {
-            vkDestroyImage(mDevice, vt.image, nullptr);
-            continue;
-        }
-        if (vkBindImageMemory(mDevice, vt.image, vt.memory, 0) != VK_SUCCESS) {
-            vkFreeMemory(mDevice, vt.memory, nullptr);
-            vkDestroyImage(mDevice, vt.image, nullptr);
-            continue;
-        }
+            VkMemoryAllocateInfo mai{};
+            mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            mai.allocationSize = memReqs.size;
+            mai.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (mai.memoryTypeIndex == ~0u || vkAllocateMemory(mDevice, &mai, nullptr, &vt.memory) != VK_SUCCESS) {
+                vkDestroyImage(mDevice, vt.image, nullptr);
+                continue;
+            }
+            if (vkBindImageMemory(mDevice, vt.image, vt.memory, 0) != VK_SUCCESS) {
+                vkFreeMemory(mDevice, vt.memory, nullptr);
+                vkDestroyImage(mDevice, vt.image, nullptr);
+                continue;
+            }
 
-        VkImageViewCreateInfo ivci{};
-        ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        ivci.image = vt.image;
-        ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
-        ivci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        ivci.subresourceRange.levelCount = vt.levels;
-        ivci.subresourceRange.layerCount = 1;
-        if (vkCreateImageView(mDevice, &ivci, nullptr, &vt.view) != VK_SUCCESS) {
-            vkFreeMemory(mDevice, vt.memory, nullptr);
-            vkDestroyImage(mDevice, vt.image, nullptr);
-            continue;
+            VkImageViewCreateInfo ivci{};
+            ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            ivci.image = vt.image;
+            ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
+            ivci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            ivci.subresourceRange.levelCount = vt.levels;
+            ivci.subresourceRange.layerCount = 1;
+            if (vkCreateImageView(mDevice, &ivci, nullptr, &vt.view) != VK_SUCCESS) {
+                vkFreeMemory(mDevice, vt.memory, nullptr);
+                vkDestroyImage(mDevice, vt.image, nullptr);
+                continue;
+            }
         }
 
         auto destroyTexture = [&]() {
+            if (reuseImage) return; // The previous valid image still belongs to img.
             vkDestroyImageView(mDevice, vt.view, nullptr);
             vkDestroyImage(mDevice, vt.image, nullptr);
             vkFreeMemory(mDevice, vt.memory, nullptr);
@@ -2608,7 +2619,8 @@ bool VkRenderer::uploadTextures(const std::vector<std::shared_ptr<TexImage>>& te
         // Flush before crossing the budget. One oversized image is allowed,
         // then flushed immediately; individual images cannot be split here.
         constexpr size_t kStagingBudget = 8 * 1024 * 1024;
-        if (recording && totalBytes > kStagingBudget - std::min(stagingBytes, kStagingBudget)) {
+        if (recording && (staging.size() >= 128 ||
+                          totalBytes > kStagingBudget - std::min(stagingBytes, kStagingBudget))) {
             if (!flush()) { destroyTexture(); return false; }
         }
         VkBuffer stagingBuf = VK_NULL_HANDLE;
@@ -2653,7 +2665,7 @@ bool VkRenderer::uploadTextures(const std::vector<std::shared_ptr<TexImage>>& te
         }
         VkImageMemoryBarrier barrierToDst{};
         barrierToDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrierToDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrierToDst.oldLayout = reuseImage ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
         barrierToDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrierToDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrierToDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -2661,10 +2673,10 @@ bool VkRenderer::uploadTextures(const std::vector<std::shared_ptr<TexImage>>& te
         barrierToDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrierToDst.subresourceRange.levelCount = vt.levels;
         barrierToDst.subresourceRange.layerCount = 1;
-        barrierToDst.srcAccessMask = 0;
+        barrierToDst.srcAccessMask = reuseImage ? VK_ACCESS_SHADER_READ_BIT : 0;
         barrierToDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
-        vkCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        vkCmdPipelineBarrier(mCommandBuffer, reuseImage ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrierToDst);
 
         std::vector<VkBufferImageCopy> regions(vt.levels);
@@ -2696,7 +2708,10 @@ bool VkRenderer::uploadTextures(const std::vector<std::shared_ptr<TexImage>>& te
         img->vkImage = (uint64_t)vt.image;
         img->vkMemory = (uint64_t)vt.memory;
         img->vkView = (uint64_t)vt.view;
-        img->vkVersion = vt.version;
+        img->vkVersion = img->version;
+        img->vkWidth = vt.width;
+        img->vkHeight = vt.height;
+        img->vkLevels = vt.levels;
         img->vkGeneration = sVkDeviceGeneration;
         if (stagingBytes >= kStagingBudget && !flush()) return false;
     }
@@ -3299,6 +3314,10 @@ bool VkRenderer::render(VkTarget& target, const EyeView* eye, VkTarget* hud, Hud
     float fx = (float)target.width / (float)p.nativeW;
     float fy = (float)target.height / (float)p.nativeH;
 
+    // All batches use this index buffer. firstIndex replaces rebinding it at
+    // a different byte offset for every draw; vertex offsets remain unchanged.
+    vkCmdBindIndexBuffer(mCommandBuffer, fr.ibo, 0, VK_INDEX_TYPE_UINT32);
+    VkDrawState drawState(mCommandBuffer, mPipelineLayout);
     bool inRenderPass = true;
     bool inHudSection = false;
     for (const Item& it : items) {
@@ -3311,6 +3330,7 @@ bool VkRenderer::render(VkTarget& target, const EyeView* eye, VkTarget* hud, Hud
         }
 
         if (it.type == IT_COPY) {
+            drawState.reset();
             static const bool noCopies = debugEnv("PETARI_NOCOPY") != nullptr;
             if (noCopies && !((it.copy[9] >> 14) & 1)) continue;
 
@@ -3549,12 +3569,12 @@ bool VkRenderer::render(VkTarget& target, const EyeView* eye, VkTarget* hud, Hud
         viewport.height = (float)vh;
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
-        vkCmdSetViewport(mCommandBuffer, 0, 1, &viewport);
+        drawState.setViewport(viewport);
 
         VkRect2D scissor{};
         scissor.offset = {sx, sy};
         scissor.extent = {(uint32_t)sw, (uint32_t)sh};
-        vkCmdSetScissor(mCommandBuffer, 0, 1, &scissor);
+        drawState.setScissor(scissor);
 
         // Pipeline
         if (it.uid >= p.uids.size()) {
@@ -3563,7 +3583,7 @@ bool VkRenderer::render(VkTarget& target, const EyeView* eye, VkTarget* hud, Hud
         }
         VkPipeline pipeline = getPipeline(it, p.uids[it.uid]);
         if (pipeline == VK_NULL_HANDLE) continue;
-        vkCmdBindPipeline(mCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        drawState.bindPipeline(pipeline);
 
         // Push constants
         vkCmdPushConstants(mCommandBuffer, mPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uint32_t), &it.firstOrdinal);
@@ -3608,15 +3628,14 @@ bool VkRenderer::render(VkTarget& target, const EyeView* eye, VkTarget* hud, Hud
             LOGE("VkRenderer: failed to allocate sampler descriptor set - skipping draw");
             continue;
         }
-        vkCmdBindDescriptorSets(mCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 1, 1, &set1, 0, nullptr);
+        drawState.bindTextures(set1);
 
         // Bind vertex & index buffers
         VkDeviceSize vOffset = (VkDeviceSize)it.firstWord * 4;
         vkCmdBindVertexBuffers(mCommandBuffer, 0, 1, &fr.vbo, &vOffset);
-        vkCmdBindIndexBuffer(mCommandBuffer, fr.ibo, (VkDeviceSize)it.idxOffset * 4, VK_INDEX_TYPE_UINT32);
 
         // Draw indexed
-        vkCmdDrawIndexed(mCommandBuffer, it.idxCount, 1, 0, 0, 0);
+        vkCmdDrawIndexed(mCommandBuffer, it.idxCount, 1, it.idxOffset, 0, 0);
     }
 
     if (inRenderPass) {

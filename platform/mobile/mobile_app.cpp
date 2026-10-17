@@ -509,17 +509,10 @@ bool createSurface(MobileApp& a) {
     }
 
     // Allocate offscreen target (aspect-matched when in fullscreen mode)
-    int scaleChoice = mobile_ui::get().settings().renderScale;
     int dispH = std::min(a.screenWidth, a.screenHeight);
     int dispW = std::max(a.screenWidth, a.screenHeight);
-    int targetH = 1080;
-    if (scaleChoice == 0) targetH = 480;       // Native 480p (blazing fast for low-end devices)
-    else if (scaleChoice == 1) targetH = 720;  // 720p HD (great for Helio G81/G99)
-    else if (scaleChoice == 2) targetH = 1080; // 1080p FHD
-    else if (scaleChoice == 3) targetH = 1440; // 1440p 2K Ultra
-    else if (dispH > 1080) {
-        targetH = std::min(dispH, 1440);
-    }
+    int targetH = mobile_ui::resolution::height(mobile_ui::get().settings().renderScale,
+                                                mobile_ui::get().settings().batterySaver);
     int targetW;
     if (mobile_ui::get().settings().fullscreen) {
         float nativeAspect = (float)dispW / (float)dispH;
@@ -830,16 +823,10 @@ static bool bringUpVulkan(MobileApp& a, ANativeWindow* window) {
     enforceLandscapeOrientation(a);
     a.windowReady = true;
 
-    int scaleChoice = mobile_ui::get().settings().renderScale;
     int dispH = std::min(a.screenWidth, a.screenHeight);
     int dispW = std::max(a.screenWidth, a.screenHeight);
-    int targetH = 1080;
-    if (scaleChoice == 0) targetH = 480;
-    else if (scaleChoice == 1) targetH = 720;
-    else if (scaleChoice == 2) targetH = 1080;
-    else if (scaleChoice == 3) targetH = 1440;
-    else if (dispH > 1080) targetH = std::min(dispH, 1440);
-
+    int targetH = mobile_ui::resolution::height(mobile_ui::get().settings().renderScale,
+                                                mobile_ui::get().settings().batterySaver);
     int targetW;
     if (mobile_ui::get().settings().fullscreen) {
         float nativeAspect = (float)dispW / (float)dispH;
@@ -1280,15 +1267,8 @@ extern "C" __attribute__((visibility("default"))) void port_android_main(struct 
             if (newFrame) {
                 gPresentedFrames.store(vkr.frameNumber());
 
-                int scaleChoice = mobile_ui::get().settings().renderScale;
-                int desiredTargetH = 1080;
-                if (scaleChoice == 0) desiredTargetH = 480;       // Native 480p
-                else if (scaleChoice == 1) desiredTargetH = 720;  // 720p HD
-                else if (scaleChoice == 2) desiredTargetH = 1080; // 1080p FHD
-                else if (scaleChoice == 3) desiredTargetH = 1440; // 1440p 2K
-                else if (a.screenHeight > 1080) {
-                    desiredTargetH = std::min(a.screenHeight, 1440);
-                }
+                int desiredTargetH = mobile_ui::resolution::height(mobile_ui::get().settings().renderScale,
+                                                                   mobile_ui::get().settings().batterySaver);
                 int desiredTargetW;
                 if (mobile_ui::get().settings().fullscreen) {
                     float nativeAspect = (float)a.screenWidth / (float)a.screenHeight;
@@ -1352,18 +1332,8 @@ extern "C" __attribute__((visibility("default"))) void port_android_main(struct 
                 gPresentedFrames.store(r.frameNumber());
 
                 // Check if offscreen target dimensions need to change (e.g. toggled fullscreen or resolution scale)
-                int scaleChoice = mobile_ui::get().settings().renderScale;
-                if (mobile_ui::get().settings().batterySaver) {
-                    scaleChoice = std::min(scaleChoice, 1);
-                }
-                int desiredTargetH = 1080;
-                if (scaleChoice == 0) desiredTargetH = 480;       // Native 480p (max performance)
-                else if (scaleChoice == 1) desiredTargetH = 720;  // 720p HD (smooth performance on budget chips)
-                else if (scaleChoice == 2) desiredTargetH = 1080; // 1080p Full HD
-                else if (scaleChoice == 3) desiredTargetH = 1440; // 1440p 2K Ultra
-                else if (a.screenHeight > 1080) {
-                    desiredTargetH = std::min(a.screenHeight, 1440);
-                }
+                int desiredTargetH = mobile_ui::resolution::height(mobile_ui::get().settings().renderScale,
+                                                                   mobile_ui::get().settings().batterySaver);
                 int desiredTargetW;
                 if (mobile_ui::get().settings().fullscreen) {
                     float nativeAspect = (float)a.screenWidth / (float)a.screenHeight;

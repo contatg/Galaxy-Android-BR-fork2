@@ -308,7 +308,7 @@ void Settings::load(const std::string& path) {
             else if (!strcmp(key, "mod_infinite_starbits")) modInfiniteStarBits = (val > 0.5f);
             else if (!strcmp(key, "game_speed")) gameSpeed = std::max(1, std::min(5, (int)val));
             else if (!strcmp(key, "language_choice")) languageChoice = std::max(0, std::min(5, (int)val));
-            else if (!strcmp(key, "render_scale")) renderScale = std::max(0, std::min(3, (int)val));
+            else if (!strcmp(key, "render_scale")) renderScale = resolution::sanitize((int)val);
             else if (!strcmp(key, "target_fps")) {
                 int v = (int)val;
                 if (v >= 144) targetFps = 144;
@@ -1221,12 +1221,10 @@ bool UIOverlay::handleInput(const AInputEvent* event, PortPadState& pad, int& sp
                         }
                         // Row 16: Render Resolution
                         else if (contentRelY >= 892.0f * uiScale && contentRelY < 950.0f * uiScale) {
-                            float segW = contentW / 4.0f;
+                            float segW = contentW / (float)resolution::options.size();
                             int idx = (int)((px - (drawerX + padX)) / segW);
-                            mSettings.renderScale = std::max(0, std::min(3, idx));
-                            showToast(mSettings.renderScale == 0 ? "Resolution: 480p (Max Performance)" :
-                                      mSettings.renderScale == 1 ? "Resolution: 720p (HD Balanced)" :
-                                      mSettings.renderScale == 2 ? "Resolution: 1080p (Full HD)" : "Resolution: 1440p (2K Ultra)");
+                            mSettings.renderScale = resolution::idAt(idx);
+                            showToast(std::string("Resolution: ") + resolution::label(mSettings.renderScale));
                         }
                         // Row 16b: Display Refresh Rate & Framerate
                         else if (contentRelY >= 950.0f * uiScale && contentRelY < 1008.0f * uiScale) {
@@ -2553,9 +2551,10 @@ void UIOverlay::generateVertices(int screenW, int screenH, std::vector<UIVertex>
             // Row 16: Render Resolution Segmented Button
             renderRow(892.0f * uiScale, 54.0f * uiScale, [&](float y) {
                 drawText("Render Resolution", drawerX + padX, y + 14.0f * uiScale, 0.38f * uiScale, rgba(0.902f, 0.906f, 0.922f, 1.0f), 0);
-                const char* resOpts[4] = {"480p", "720p", "1080p", "1440p"};
-                int resIdx = std::max(0, std::min(3, mSettings.renderScale));
-                drawSegmentedGroup(drawerX + padX, y + 22.0f * uiScale, contentW, 34.0f * uiScale, resOpts, 4, resIdx);
+                const char* resOpts[6];
+                for (size_t i = 0; i < resolution::options.size(); ++i) resOpts[i] = resolution::options[i].label;
+                int resIdx = resolution::indexOf(mSettings.renderScale);
+                drawSegmentedGroup(drawerX + padX, y + 22.0f * uiScale, contentW, 34.0f * uiScale, resOpts, 6, resIdx);
             });
 
             // Row 16b: Display Refresh & Framerate Pacing
@@ -2641,7 +2640,7 @@ void UIOverlay::generateVertices(int screenW, int screenH, std::vector<UIVertex>
 
                 char gpuLine[128], resLine[128], apiLine[128];
                 snprintf(gpuLine, sizeof(gpuLine), "GPU: %s", mGpuRendererName.empty() ? "OpenGL ES 3.2" : mGpuRendererName.c_str());
-                const char* resStr = (mSettings.renderScale == 0) ? "480p" : (mSettings.renderScale == 1) ? "720p" : (mSettings.renderScale == 2) ? "1080p" : "1440p";
+                const char* resStr = resolution::label(mSettings.renderScale);
                 snprintf(resLine, sizeof(resLine), "Display: %dx%d (%s Target • Hor+)", (int)w, (int)h, resStr);
                 snprintf(apiLine, sizeof(apiLine), "Active Engine: %s • Native ARM64", (mActiveBackend == 1) ? "Vulkan 1.0" : "OpenGL ES 3.2 (fallback)");
 

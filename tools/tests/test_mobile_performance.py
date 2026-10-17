@@ -36,7 +36,7 @@ class MobilePerformanceTests(unittest.TestCase):
             binary = Path(tmp) / 'probe'
             command = [self.compiler, '-std=c++20', '-O0', '-ffunction-sections', '-fdata-sections',
                        *['-I' + str(p) for p in self.includes], *extra,
-                       str(ROOT / source), str(TESTS / probe), '-Wl,--gc-sections', '-pthread', '-o', str(binary)]
+                       *([str(ROOT / source)] if source else []), str(TESTS / probe), '-Wl,--gc-sections', '-pthread', '-o', str(binary)]
             built = subprocess.run(command, text=True, capture_output=True)
             self.assertEqual(built.returncode, 0, built.stderr)
             ran = subprocess.run([str(binary)], text=True, capture_output=True)
@@ -45,6 +45,12 @@ class MobilePerformanceTests(unittest.TestCase):
 
     def test_vulkan_buffer_and_texture_lifecycles(self):
         self.probe('platform/src/gx/vk_renderer.cpp', 'vk_upload_probe.cpp')
+
+    def test_resolution_saved_ids_and_render_height(self):
+        self.probe(None, 'mobile_render_options_probe.cpp')
+
+    def test_vulkan_draw_state_cache(self):
+        self.probe(None, 'vk_draw_state_probe.cpp')
 
     def test_hardware_sampling_obeys_hud_mode(self):
         self.probe('platform/mobile/mobile_ui.cpp', 'ui_metrics_probe.cpp',
